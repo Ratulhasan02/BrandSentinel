@@ -1,0 +1,12 @@
+backend/brand.db
+__pycache__/
+*.py[cod]
+node_modules/
+dist/
+frontend/.env
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+.vscode/
