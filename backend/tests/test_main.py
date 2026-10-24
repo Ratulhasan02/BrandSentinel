@@ -348,6 +348,31 @@ class BrandSentinelTests(unittest.TestCase):
             self.assertEqual(len(demo_accounts), 4)
             self.assertEqual(len(main.q("SELECT * FROM sources")), 3)
             self.assertEqual(len(main.demo_accounts()), 4)
+            samples = main.q(
+                "SELECT id,title,status FROM submissions WHERE author='creator_demo' "
+                "ORDER BY title"
+            )
+            self.assertEqual(
+                [(item["title"], item["status"]) for item in samples],
+                [
+                    ("Sample: Draft to practise accept/reject", "draft"),
+                    ("Sample: Summer Promotion Ad (in review)", "in_review"),
+                ],
+            )
+            for sample in samples:
+                detail = main.detail(sample["id"], "admin-token")
+                self.assertTrue(detail["findings"])
+            review_sample = next(
+                item
+                for item in samples
+                if item["title"] == "Sample: Summer Promotion Ad (in review)"
+            )
+            findings = main.q(
+                "SELECT ftype FROM findings WHERE submission_id=?",
+                (review_sample["id"],),
+            )
+            finding_types = {item["ftype"] for item in findings}
+            self.assertTrue({"claim", "tone", "terminology"} <= finding_types)
 
         with patch.object(main, "DEMO_MODE", False):
             main.ensure_demo_users()
@@ -357,6 +382,144 @@ class BrandSentinelTests(unittest.TestCase):
             one=True,
         )
         self.assertEqual(remaining["n"], 0)
+
+    def test_health_reports_status_and_demo_mode_without_user_data(self):
+        for demo_mode in (False, True):
+            with self.subTest(demo_mode=demo_mode), patch.object(
+                main, "DEMO_MODE", demo_mode
+            ):
+                self.assertEqual(
+                    main.health(),
+                    {"status": "ok", "demo_mode": demo_mode},
+                )
+
+    def test_demo_submission_seed_is_idempotent_and_skips_llm(self):
+        with patch.object(main, "DEMO_MODE", True), patch.dict(
+            os.environ, {"ANTHROPIC_API_KEY": "test-only-key"}
+        ), patch("anthropic.Anthropic") as anthropic_client:
+            main.ensure_demo_users()
+            main.seed_demo_submissions()
+            self.assertEqual(
+                main.q(
+                    "SELECT count(*) AS n FROM submissions WHERE author='creator_demo'",
+                    one=True,
+                )["n"],
+                2,
+            )
+            anthropic_client.assert_not_called()
+        seeded = main.q(
+            "SELECT llm_status,llm_detail FROM submissions WHERE author='creator_demo'"
+        )
+        self.assertTrue(all(item["llm_status"] == "skipped" for item in seeded))
+        self.assertTrue(
+            all(
+                item["llm_detail"]
+                == "Sample data seeded without an LLM call."
+                for item in seeded
+            )
+        )
+
+    def test_demo_reset_access_and_restores_only_sample_submissions(self):
+        with patch.object(main, "DEMO_MODE", False):
+            with self.assertRaises(HTTPException) as disabled:
+                main.reset_demo_samples("admin-token")
+        self.assertEqual(disabled.exception.status_code, 404)
+
+        with patch.object(main, "DEMO_MODE", True):
+            main.ensure_demo_users()
+            with self.assertRaises(HTTPException) as denied:
+                main.reset_demo_samples("creator-token")
+            self.assertEqual(denied.exception.status_code, 403)
+
+            main.TOKENS["admin-demo-token"] = {
+                "name": "admin_demo",
+                "role": "admin",
+                "expires": 4_000_000_000,
+            }
+            review_sample = main.q(
+                "SELECT id FROM submissions WHERE author='creator_demo' "
+                "AND title='Sample: Summer Promotion Ad (in review)'",
+                one=True,
+            )
+            draft_sample = main.q(
+                "SELECT id FROM submissions WHERE author='creator_demo' "
+                "AND title='Sample: Draft to practise accept/reject'",
+                one=True,
+            )
+            main.set_status(
+                review_sample["id"],
+                main.Status(status="approved", reason="Reviewed for the demo."),
+                "admin-demo-token",
+            )
+            main.edit_submission(
+                draft_sample["id"],
+                main.EditSub(
+                    title="Sample: Draft to practise accept/reject",
+                    channel="social post",
+                    text="Edited demo content with affordable plans.",
+                ),
+                "admin-demo-token",
+            )
+
+            untouched_id = main.create_submission(
+                main.NewSub(title="Keep this", text="Other creator content."),
+                "creator-token",
+            )["id"]
+            self.assertEqual(
+                main.reset_demo_samples("admin-demo-token"), {"ok": True}
+            )
+            restored = main.q(
+                "SELECT id,title,status,text,version FROM submissions "
+                "WHERE author='creator_demo' ORDER BY title"
+            )
+            self.assertEqual(len(restored), 2)
+            by_title = {item["title"]: item for item in restored}
+            self.assertEqual(
+                by_title["Sample: Summer Promotion Ad (in review)"]["status"],
+                "in_review",
+            )
+            self.assertEqual(
+                by_title["Sample: Draft to practise accept/reject"]["status"],
+                "draft",
+            )
+            self.assertEqual(
+                by_title["Sample: Draft to practise accept/reject"]["text"],
+                "Join our community today!! Our cheap plans are built for everyone.",
+            )
+            for sample in restored:
+                detail = main.detail(sample["id"], "admin-demo-token")
+                self.assertEqual(len(detail["versions"]), 1)
+                self.assertEqual(detail["comments"], [])
+                self.assertEqual(detail["activity"], [])
+                self.assertTrue(detail["findings"])
+            self.assertEqual(
+                main.q("SELECT id FROM submissions WHERE id=?", (untouched_id,), one=True)[
+                    "id"
+                ],
+                untouched_id,
+            )
+
+    def test_demo_mode_off_removes_demo_submissions_and_accounts(self):
+        with patch.object(main, "DEMO_MODE", True):
+            main.ensure_demo_users()
+        with patch.object(main, "DEMO_MODE", False):
+            main.ensure_demo_users()
+            self.assertEqual(main.demo_accounts(), [])
+        self.assertEqual(
+            main.q(
+                "SELECT count(*) AS n FROM users WHERE name IN (?,?,?,?)",
+                tuple(main.DEMO_NAMES),
+                one=True,
+            )["n"],
+            0,
+        )
+        self.assertEqual(
+            main.q(
+                "SELECT count(*) AS n FROM submissions WHERE author='creator_demo'",
+                one=True,
+            )["n"],
+            0,
+        )
 
     def test_role_access_and_approval_high_risk_override(self):
         created = main.create_submission(

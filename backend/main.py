@@ -40,8 +40,12 @@ DEMO_NAMES = {name for name, _ in DEMO_USERS}
 
 
 def ensure_demo_users():
-    """Create demo accounts and sources when enabled; otherwise remove those accounts."""
+    """Create demo accounts, sources, and submissions when enabled."""
     if not DEMO_MODE:
+        submissions = q(
+            "SELECT id FROM submissions WHERE author='creator_demo'"
+        )
+        _delete_submissions([submission["id"] for submission in submissions])
         for name in DEMO_NAMES:
             q("DELETE FROM users WHERE name=?", (name,), write=True)
         return
@@ -49,6 +53,7 @@ def ensure_demo_users():
         if not q("SELECT 1 FROM users WHERE name=?", (name,), one=True):
             create_user(name, role, DEMO_PASSWORD)
     seed_demo_data()
+    seed_demo_submissions()
 
 
 @asynccontextmanager
@@ -466,7 +471,7 @@ def llm_review(text):
         return [], "failed", f"Anthropic review failed ({type(exc).__name__})."
 
 
-def run_review(submission_id):
+def run_review(submission_id, use_llm=True):
     submission = q(
         "SELECT * FROM submissions WHERE id=?", (submission_id,), one=True
     )
@@ -485,7 +490,12 @@ def run_review(submission_id):
         )
     }
     deterministic = rule_review(submission["text"])
-    llm_findings, llm_status, llm_detail = llm_review(submission["text"])
+    if use_llm:
+        llm_findings, llm_status, llm_detail = llm_review(submission["text"])
+    else:
+        llm_findings = []
+        llm_status = "skipped"
+        llm_detail = "Sample data seeded without an LLM call."
     q(
         "UPDATE submissions SET llm_status=?, llm_detail=? WHERE id=?",
         (llm_status, llm_detail, submission_id),
@@ -625,6 +635,11 @@ def register(body: Register):
     return login(Login(name=name, password=body.password))
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "demo_mode": DEMO_MODE}
+
+
 @app.get("/demo-accounts")
 def demo_accounts():
     if not DEMO_MODE:
@@ -633,6 +648,26 @@ def demo_accounts():
         {"name": name, "role": role, "password": DEMO_PASSWORD}
         for name, role in DEMO_USERS
     ]
+
+
+@app.post("/demo/reset")
+def reset_demo_samples(x_token: str = Header("")):
+    if not DEMO_MODE:
+        raise HTTPException(404, "Not found")
+    if me(x_token)["role"] != "admin":
+        raise HTTPException(403, "Admin only")
+    titles = (
+        "Sample: Summer Promotion Ad (in review)",
+        "Sample: Draft to practise accept/reject",
+    )
+    placeholders = ",".join("?" for _ in titles)
+    submissions = q(
+        f"SELECT id FROM submissions WHERE author='creator_demo' AND title IN ({placeholders})",
+        titles,
+    )
+    _delete_submissions([submission["id"] for submission in submissions])
+    seed_demo_submissions()
+    return {"ok": True}
 
 
 @app.get("/users")
@@ -1046,6 +1081,67 @@ def seed_demo_data():
         )
         inserted.append(source_id)
     return {"inserted": len(inserted), "source_ids": inserted}
+
+
+def seed_demo_submissions():
+    """Create the review-ready sample submissions for the demo creator."""
+    samples = [
+        (
+            "Sample: Summer Promotion Ad (in review)",
+            "in_review",
+            "Our app is the #1 fastest app in Bangladesh!!! We guarantee that every customer will save 90% on all purchases. Get cheap plans for everyone.",
+        ),
+        (
+            "Sample: Draft to practise accept/reject",
+            "draft",
+            "Join our community today!! Our cheap plans are built for everyone.",
+        ),
+    ]
+    for title, status, text in samples:
+        if q(
+            "SELECT 1 FROM submissions WHERE title=? AND author='creator_demo'",
+            (title,),
+            one=True,
+        ):
+            continue
+        created = now()
+        submission_id = q(
+            "INSERT INTO submissions(title,channel,author,status,text,version,created) "
+            "VALUES(?,?,?,?,?,1,?)",
+            (title, "social post", "creator_demo", status, text, created),
+            write=True,
+        )
+        q(
+            "INSERT INTO versions(submission_id,version,text,note,author,created) "
+            "VALUES(?,1,?,?,?,?)",
+            (
+                submission_id,
+                text,
+                "Initial submission (demo sample)",
+                "creator_demo",
+                created,
+            ),
+            write=True,
+        )
+        run_review(submission_id, use_llm=False)
+
+
+def _delete_submissions(submission_ids):
+    if not submission_ids:
+        return
+    placeholders = ",".join("?" for _ in submission_ids)
+    args = tuple(submission_ids)
+    for table in ("findings", "versions", "comments", "approval_activity"):
+        q(
+            f"DELETE FROM {table} WHERE submission_id IN ({placeholders})",
+            args,
+            write=True,
+        )
+    q(
+        f"DELETE FROM submissions WHERE id IN ({placeholders})",
+        args,
+        write=True,
+    )
 
 
 def _cli():

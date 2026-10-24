@@ -29,8 +29,17 @@ export default function App() {
     setUser(null);
   };
   const call = async (path, opts = {}) => {
-    const r = await fetch(API + path, { ...opts, headers: { "Content-Type": "application/json", "X-Token": user?.token || "" },
-      body: opts.body ? JSON.stringify(opts.body) : undefined });
+    let r;
+    try {
+      r = await fetch(API + path, { ...opts, headers: { "Content-Type": "application/json", "X-Token": user?.token || "" },
+        body: opts.body ? JSON.stringify(opts.body) : undefined });
+    } catch {
+      const message = "Cannot reach the server. It may be waking up (free hosting); please wait a minute and try again.";
+      setErr(message);
+      const error = new Error(message);
+      error.networkError = true;
+      throw error;
+    }
     const d = await r.json().catch(() => ({}));
     if (!r.ok) {
       if (r.status === 401 && user?.token) {
@@ -56,7 +65,40 @@ function Login({ onLogin, call, err }) {
   const [role, setRole] = useState("creator");
   const [notice, setNotice] = useState("");
   const [demo, setDemo] = useState([]);
-  useEffect(() => { call("/demo-accounts").then(setDemo).catch(() => {}); }, []);
+  const [demoStatus, setDemoStatus] = useState("loading");
+  const [demoRetrying, setDemoRetrying] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let timer;
+    let retries = 0;
+    const loadDemoAccounts = async () => {
+      try {
+        const accounts = await call("/demo-accounts");
+        if (!active) return;
+        setDemo(accounts);
+        setDemoStatus("ready");
+        setDemoRetrying(false);
+      } catch (error) {
+        if (!active) return;
+        if (!error.networkError) {
+          setDemoStatus("ready");
+          return;
+        }
+        setDemoRetrying(true);
+        if (retries < 12) {
+          retries += 1;
+          timer = setTimeout(loadDemoAccounts, 5000);
+        } else {
+          setDemoStatus("unreachable");
+        }
+      }
+    };
+    loadDemoAccounts();
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, []);
   const go = async (path, body) => {
     try {
       const result = await call(path, { method: "POST", body });
@@ -84,6 +126,10 @@ function Login({ onLogin, call, err }) {
     {register && <div className="small">Creator and reviewer accounts are ready immediately. Manager accounts need admin approval before login.</div>}
     {notice && <div className="small" role="status" style={{ color: "#0f766e" }}>{notice}</div>}
     {err && <div className="err">{err}</div>}
+    {demoStatus === "loading" && demoRetrying &&
+      <div className="small">Waking up the server (free hosting). This can take up to a minute...</div>}
+    {demoStatus === "unreachable" &&
+      <div className="err">The server is not responding. Please refresh the page in a minute.</div>}
     {demo.length > 0 && <div style={{ background: "#ecfdf5", borderLeft: "3px solid #0f766e", padding: 8, borderRadius: 6, marginTop: 12 }}>
       <b>Judge demo accounts</b>
       <div className="small">One click to try each role. These exist for evaluation only.</div>
@@ -112,20 +158,44 @@ function Users({ call }) {
 
 function Main({ user, call }) {
   const [tab, setTab] = useState("review"); const [subs, setSubs] = useState([]); const [sel, setSel] = useState(null);
-  const load = async () => setSubs(await call("/submissions"));
-  useEffect(() => { load(); }, []);
-  return (<div className="wrap"><div>
+  const load = async () => {
+    const submissions = await call("/submissions");
+    setSubs(submissions);
+    return submissions;
+  };
+  useEffect(() => {
+    load().then(submissions => {
+      const status = user.role === "creator" ? "draft" : "in_review";
+      const firstUseful = submissions.find(submission => submission.status === status);
+      if (firstUseful) setSel(current => current === null ? firstUseful.id : current);
+    }).catch(() => {});
+  }, []);
+  const resetDemo = async () => {
+    try {
+      await call("/demo/reset", { method: "POST" });
+      await load();
+      setSel(null);
+    } catch {}
+  };
+  const demoTip = user.name.endsWith("_demo") ? {
+    creator: 'Demo tip: open the draft sample, accept or reject the suggestions, then click "Send to manager review".',
+    reviewer: 'Demo tip: a sample submission is waiting for review. Read the findings, add a comment, then Approve, Request changes or Reject. Approving with a high-severity finding needs a written reason.',
+    manager: 'Demo tip: a sample submission is waiting for review. Read the findings, add a comment, then Approve, Request changes or Reject. Approving with a high-severity finding needs a written reason.',
+    admin: 'Demo tip: open Users to manage roles and pending manager sign-ups, and Brand sources to view or add sources. Use "Reset demo samples" to restore the sample submissions.',
+  }[user.role] : null;
+  return (<>{demoTip && <div className="card">{demoTip}</div>}<div className="wrap"><div>
     <div className="row"><button onClick={() => setTab("review")}>Reviews</button>
       <button className="alt" onClick={() => setTab("sources")}>Brand sources</button>
       {user.role === "admin" && <button className="alt" onClick={() => setTab("users")}>Users</button>}</div>
     {tab === "review" && <>
+      {user.name === "admin_demo" && <button className="alt" onClick={resetDemo}>Reset demo samples</button>}
       <NewSub call={call} onDone={async id => { await load(); setSel(id); }} />
       <div className="card"><b>Submissions</b>{subs.map(s => <div key={s.id} className={"sub" + (sel === s.id ? " on" : "")} onClick={() => setSel(s.id)}>
         {s.title} <span className="tag">{s.status}</span><div className="small">{s.author} - v{s.version}</div></div>)}</div></>}
   </div><div>{tab === "sources" ? <Sources user={user} call={call} />
     : tab === "users" ? <Users call={call} />
     : sel ? <Detail key={sel} id={sel} user={user} call={call} refresh={load} />
-    : <div className="card">Select or create a submission.</div>}</div></div>);
+    : <div className="card">Select or create a submission.</div>}</div></div></>);
 }
 
 function NewSub({ call, onDone }) {
