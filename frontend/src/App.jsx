@@ -2,43 +2,87 @@ import { useState, useEffect } from "react";
 const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
 
 export default function App() {
-  const [user, setUser] = useState(null);
+  const [user, setUser] = useState(() => {
+    const saved = localStorage.getItem("brandsentinel.user");
+    if (!saved) return null;
+    try {
+      const session = JSON.parse(saved);
+      if (
+        typeof session.token === "string" &&
+        typeof session.name === "string" &&
+        typeof session.role === "string"
+      ) {
+        return session;
+      }
+    } catch {
+      localStorage.removeItem("brandsentinel.user");
+    }
+    return null;
+  });
   const [err, setErr] = useState("");
+  const handleLogin = session => {
+    localStorage.setItem("brandsentinel.user", JSON.stringify(session));
+    setUser(session);
+  };
+  const handleLogout = () => {
+    localStorage.removeItem("brandsentinel.user");
+    setUser(null);
+  };
   const call = async (path, opts = {}) => {
     const r = await fetch(API + path, { ...opts, headers: { "Content-Type": "application/json", "X-Token": user?.token || "" },
       body: opts.body ? JSON.stringify(opts.body) : undefined });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) { setErr(d.detail || "Request failed"); throw new Error(d.detail); }
+    if (!r.ok) {
+      if (r.status === 401 && user?.token) {
+        localStorage.removeItem("brandsentinel.user");
+        setUser(null);
+      }
+      setErr(d.detail || "Request failed");
+      throw new Error(d.detail);
+    }
     setErr(""); return d;
   };
-  if (!user) return <Login onLogin={setUser} call={call} err={err} />;
+  if (!user) return <Login onLogin={handleLogin} call={call} err={err} />;
   return (<>
-    <header><b>BrandSentinel</b><span>{user.name} ({user.role}) <button className="alt" onClick={() => setUser(null)}>Log out</button></span></header>
+    <header><b>BrandSentinel</b><span>{user.name} ({user.role}) <button className="alt" onClick={handleLogout}>Log out</button></span></header>
     {err && <div className="err" style={{ padding: "0 18px" }}>{err}</div>}
     <Main user={user} call={call} />
   </>);
 }
 
-// ===== FRONTEND PATCH for App.jsx =====
-
-// --- 1) REPLACE your whole Login function with this --------------------------------
 function Login({ onLogin, call, err }) {
   const [mode, setMode] = useState("login");
   const [name, setName] = useState(""); const [password, setPassword] = useState("");
+  const [role, setRole] = useState("creator");
+  const [notice, setNotice] = useState("");
   const [demo, setDemo] = useState([]);
   useEffect(() => { call("/demo-accounts").then(setDemo).catch(() => {}); }, []);
-  const go = async (path, body) => { try { onLogin(await call(path, { method: "POST", body })); } catch {} };
+  const go = async (path, body) => {
+    try {
+      const result = await call(path, { method: "POST", body });
+      if (result.approval_status === "pending") {
+        setNotice("Your manager account request was sent to an admin. You can log in after it is approved.");
+        return;
+      }
+      setNotice("");
+      onLogin(result);
+    } catch {}
+  };
   const register = mode === "register";
   return (<div className="card" style={{ maxWidth: 400, margin: "60px auto" }}>
     <h2>BrandSentinel</h2><p className="small">Pre-publication brand review. AI suggests, humans decide.</p>
     <div className="row">
-      <button className={register ? "alt" : ""} onClick={() => setMode("login")}>Log in</button>
-      <button className={register ? "" : "alt"} onClick={() => setMode("register")}>Create account</button></div>
+      <button className={register ? "alt" : ""} onClick={() => { setMode("login"); setNotice(""); }}>Log in</button>
+      <button className={register ? "" : "alt"} onClick={() => { setMode("register"); setNotice(""); }}>Create account</button></div>
     <div className="row"><input autoComplete="username" placeholder="Username" value={name} onChange={e => setName(e.target.value)} />
       <input autoComplete={register ? "new-password" : "current-password"} type="password"
         placeholder={register ? "Password (12+ characters)" : "Password"} value={password} onChange={e => setPassword(e.target.value)} />
-      <button onClick={() => go(register ? "/register" : "/login", { name, password })}>{register ? "Sign up" : "Log in"}</button></div>
-    <div className="small">New accounts are always creators. Manager and reviewer roles are assigned by an administrator.</div>
+      {register && <select aria-label="Account role" value={role} onChange={e => setRole(e.target.value)}>
+        <option value="creator">Creator</option><option value="reviewer">Reviewer</option><option value="manager">Manager (admin approval required)</option>
+      </select>}
+      <button onClick={() => go(register ? "/register" : "/login", { name, password, ...(register ? { role } : {}) })}>{register ? "Sign up" : "Log in"}</button></div>
+    {register && <div className="small">Creator and reviewer accounts are ready immediately. Manager accounts need admin approval before login.</div>}
+    {notice && <div className="small" role="status" style={{ color: "#0f766e" }}>{notice}</div>}
     {err && <div className="err">{err}</div>}
     {demo.length > 0 && <div style={{ background: "#ecfdf5", borderLeft: "3px solid #0f766e", padding: 8, borderRadius: 6, marginTop: 12 }}>
       <b>Judge demo accounts</b>
@@ -48,26 +92,22 @@ function Login({ onLogin, call, err }) {
     </div>}</div>);
 }
 
-// --- 2) In Main(): add this button right after the "Brand sources" button ----------
-// {user.role === "admin" && <button className="alt" onClick={() => setTab("users")}>Users</button>}
-
-// --- 3) In Main(): change the right-hand render to ---------------------------------
-// {tab === "sources" ? <Sources user={user} call={call} />
-//  : tab === "users" ? <Users call={call} />
-//  : sel ? <Detail key={sel} id={sel} user={user} call={call} refresh={load} />
-//  : <div className="card">Select or create a submission.</div>}
-
-// --- 4) ADD this new component at the bottom of the file ---------------------------
 function Users({ call }) {
   const [list, setList] = useState([]);
   const load = async () => setList(await call("/users")); useEffect(() => { load(); }, []);
   const setRole = async (id, role) => { try { await call(`/users/${id}/role`, { method: "POST", body: { role } }); await load(); } catch {} };
+  const approve = async id => { try { await call(`/users/${id}/approve`, { method: "POST" }); await load(); } catch {} };
   return (<div className="card"><b>Users and roles</b>
-    <div className="small">Sign-ups start as creators. Change roles here. Admin accounts are created only on the server.</div>
+    <div className="small">Pending manager requests need approval. Admin accounts are created only on the server.</div>
     {list.map(u => <div key={u.id} className="row"><span style={{ minWidth: 170 }}>{u.name}</span>
-      {u.role === "admin" ? <span className="tag">admin</span> :
+      {u.role === "admin" ? <span className="tag">admin</span> : <>
         <select value={u.role} onChange={e => setRole(u.id, e.target.value)}>
-          {["creator", "manager", "reviewer"].map(r => <option key={r}>{r}</option>)}</select>}</div>)}</div>);
+          {["creator", "manager", "reviewer"].map(r => <option key={r}>{r}</option>)}</select>
+        {u.approval_status === "pending" ? <>
+          <span className="tag">pending</span>
+          <button onClick={() => approve(u.id)}>Approve manager</button>
+        </> : <span className="tag">approved</span>}
+      </>}</div>)}</div>);
 }
 
 function Main({ user, call }) {
@@ -76,12 +116,16 @@ function Main({ user, call }) {
   useEffect(() => { load(); }, []);
   return (<div className="wrap"><div>
     <div className="row"><button onClick={() => setTab("review")}>Reviews</button>
-      <button className="alt" onClick={() => setTab("sources")}>Brand sources</button></div>
+      <button className="alt" onClick={() => setTab("sources")}>Brand sources</button>
+      {user.role === "admin" && <button className="alt" onClick={() => setTab("users")}>Users</button>}</div>
     {tab === "review" && <>
       <NewSub call={call} onDone={async id => { await load(); setSel(id); }} />
       <div className="card"><b>Submissions</b>{subs.map(s => <div key={s.id} className={"sub" + (sel === s.id ? " on" : "")} onClick={() => setSel(s.id)}>
         {s.title} <span className="tag">{s.status}</span><div className="small">{s.author} - v{s.version}</div></div>)}</div></>}
-  </div><div>{tab === "sources" ? <Sources user={user} call={call} /> : sel ? <Detail key={sel} id={sel} user={user} call={call} refresh={load} /> : <div className="card">Select or create a submission.</div>}</div></div>);
+  </div><div>{tab === "sources" ? <Sources user={user} call={call} />
+    : tab === "users" ? <Users call={call} />
+    : sel ? <Detail key={sel} id={sel} user={user} call={call} refresh={load} />
+    : <div className="card">Select or create a submission.</div>}</div></div>);
 }
 
 function NewSub({ call, onDone }) {

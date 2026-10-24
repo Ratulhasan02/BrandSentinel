@@ -85,7 +85,7 @@ def init():
         """CREATE TABLE IF NOT EXISTS users(
             id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, role TEXT NOT NULL,
             password_hash TEXT NOT NULL, password_salt TEXT NOT NULL,
-            created TEXT NOT NULL)""",
+            created TEXT NOT NULL, approval_status TEXT NOT NULL DEFAULT 'approved')""",
         """CREATE TABLE IF NOT EXISTS sources(
             id INTEGER PRIMARY KEY, kind TEXT, title TEXT, body TEXT,
             banned TEXT, preferred TEXT)""",
@@ -109,6 +109,7 @@ def init():
     ]
     for statement in statements:
         q(statement, write=True)
+    _add_column("users", "approval_status", "TEXT NOT NULL DEFAULT 'approved'")
     _add_column("sources", "created_by", "TEXT")
     _add_column("submissions", "llm_status", "TEXT NOT NULL DEFAULT 'not_run'")
     _add_column("submissions", "llm_detail", "TEXT NOT NULL DEFAULT ''")
@@ -145,16 +146,16 @@ def _password_fields(password):
     return digest, salt
 
 
-def create_user(name, role, password):
+def create_user(name, role, password, approval_status="approved"):
     name = name.strip()
-    if not name or role not in ROLES:
+    if not name or role not in ROLES or approval_status not in {"pending", "approved"}:
         raise ValueError("A non-empty name and valid role are required.")
     password_hash, password_salt = _password_fields(password)
     try:
         return q(
-            "INSERT INTO users(name,role,password_hash,password_salt,created) "
-            "VALUES(?,?,?,?,?)",
-            (name, role, password_hash, password_salt, now()),
+            "INSERT INTO users(name,role,password_hash,password_salt,created,approval_status) "
+            "VALUES(?,?,?,?,?,?)",
+            (name, role, password_hash, password_salt, now(), approval_status),
             write=True,
         )
     except sqlite3.IntegrityError as exc:
@@ -534,6 +535,7 @@ class Login(BaseModel):
 class Register(BaseModel):
     name: str
     password: str
+    role: Literal["creator", "reviewer", "manager"] = "creator"
 
 
 class RoleChange(BaseModel):
@@ -587,6 +589,8 @@ def login(body: Login):
     ).hex()
     if not hmac.compare_digest(candidate, user["password_hash"]):
         raise HTTPException(401, "Invalid username or password")
+    if user["approval_status"] != "approved":
+        raise HTTPException(403, "Your manager account is waiting for admin approval.")
     token = secrets.token_urlsafe(32)
     TOKENS[token] = {
         "name": user["name"],
@@ -607,10 +611,17 @@ def register(body: Register):
         raise HTTPException(400, "That username is reserved")
     if q("SELECT count(*) AS n FROM users", one=True)["n"] >= 500:
         raise HTTPException(429, "Sign-ups are temporarily closed")
+    approval_status = "pending" if body.role == "manager" else "approved"
     try:
-        create_user(name, "creator", body.password)
+        create_user(name, body.role, body.password, approval_status)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    if approval_status == "pending":
+        return {
+            "name": name,
+            "role": body.role,
+            "approval_status": approval_status,
+        }
     return login(Login(name=name, password=body.password))
 
 
@@ -628,7 +639,9 @@ def demo_accounts():
 def list_users(x_token: str = Header("")):
     if me(x_token)["role"] != "admin":
         raise HTTPException(403, "Admin only")
-    return q("SELECT id,name,role,created FROM users ORDER BY id")
+    return q(
+        "SELECT id,name,role,approval_status,created FROM users ORDER BY id"
+    )
 
 
 @app.post("/users/{user_id}/role")
@@ -636,15 +649,43 @@ def change_role(user_id: int, body: RoleChange, x_token: str = Header("")):
     admin = me(x_token)
     if admin["role"] != "admin":
         raise HTTPException(403, "Admin only")
-    target = q("SELECT id,name,role FROM users WHERE id=?", (user_id,), one=True)
+    target = q(
+        "SELECT id,name,role FROM users WHERE id=?", (user_id,), one=True
+    )
     if not target:
         raise HTTPException(404, "User not found")
     if target["role"] == "admin" or target["name"] in DEMO_NAMES:
         raise HTTPException(403, "Admin and demo accounts cannot be changed here")
-    q("UPDATE users SET role=? WHERE id=?", (body.role, user_id), write=True)
+    q(
+        "UPDATE users SET role=?,approval_status='approved' WHERE id=?",
+        (body.role, user_id),
+        write=True,
+    )
     for session in TOKENS.values():
         if session["name"] == target["name"]:
             session["role"] = body.role
+    return {"ok": True}
+
+
+@app.post("/users/{user_id}/approve")
+def approve_manager(user_id: int, x_token: str = Header("")):
+    admin = me(x_token)
+    if admin["role"] != "admin":
+        raise HTTPException(403, "Admin only")
+    target = q(
+        "SELECT id,role,approval_status FROM users WHERE id=?",
+        (user_id,),
+        one=True,
+    )
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target["role"] != "manager" or target["approval_status"] != "pending":
+        raise HTTPException(409, "Only pending manager accounts can be approved")
+    q(
+        "UPDATE users SET approval_status='approved' WHERE id=?",
+        (user_id,),
+        write=True,
+    )
     return {"ok": True}
 
 

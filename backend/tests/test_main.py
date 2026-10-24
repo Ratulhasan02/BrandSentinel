@@ -217,16 +217,34 @@ class BrandSentinelTests(unittest.TestCase):
         )
         self.assertEqual(logged_in["role"], "creator")
 
-    def test_registration_validates_names_and_always_creates_creators(self):
+    def test_registration_validates_names_and_applies_selected_role(self):
         registered = main.register(
             main.Register(name="  new.creator  ", password="new-password-123")
         )
         self.assertEqual(registered["name"], "new.creator")
         self.assertEqual(registered["role"], "creator")
         user = main.q(
-            "SELECT role FROM users WHERE name='new.creator'", one=True
+            "SELECT role,approval_status FROM users WHERE name='new.creator'",
+            one=True,
         )
         self.assertEqual(user["role"], "creator")
+        self.assertEqual(user["approval_status"], "approved")
+
+        reviewer = main.register(
+            main.Register(
+                name="new.reviewer",
+                password="new-reviewer-password",
+                role="reviewer",
+            )
+        )
+        self.assertEqual(reviewer["role"], "reviewer")
+        reviewer_user = main.q(
+            "SELECT role,approval_status FROM users WHERE name='new.reviewer'",
+            one=True,
+        )
+        self.assertEqual(
+            reviewer_user, {"role": "reviewer", "approval_status": "approved"}
+        )
 
         for name in ("ab", "invalid name", "creator_demo"):
             with self.subTest(name=name), self.assertRaises(HTTPException) as error:
@@ -238,6 +256,54 @@ class BrandSentinelTests(unittest.TestCase):
         with self.assertRaises(HTTPException) as short_password:
             main.register(main.Register(name="another-user", password="short"))
         self.assertEqual(short_password.exception.status_code, 400)
+
+    def test_manager_signup_requires_admin_approval_before_login(self):
+        request = main.register(
+            main.Register(
+                name="pending.manager",
+                password="pending-manager-password",
+                role="manager",
+            )
+        )
+        self.assertEqual(
+            request,
+            {
+                "name": "pending.manager",
+                "role": "manager",
+                "approval_status": "pending",
+            },
+        )
+        pending_user = main.q(
+            "SELECT id,approval_status FROM users WHERE name='pending.manager'",
+            one=True,
+        )
+        self.assertEqual(pending_user["approval_status"], "pending")
+        with self.assertRaises(HTTPException) as pending_login:
+            main.login(
+                main.Login(
+                    name="pending.manager",
+                    password="pending-manager-password",
+                )
+            )
+        self.assertEqual(pending_login.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as non_admin:
+            main.approve_manager(pending_user["id"], "creator-token")
+        self.assertEqual(non_admin.exception.status_code, 403)
+
+        self.assertEqual(
+            main.approve_manager(pending_user["id"], "admin-token"), {"ok": True}
+        )
+        logged_in = main.login(
+            main.Login(
+                name="pending.manager",
+                password="pending-manager-password",
+            )
+        )
+        self.assertEqual(logged_in["role"], "manager")
+        with self.assertRaises(HTTPException) as already_approved:
+            main.approve_manager(pending_user["id"], "admin-token")
+        self.assertEqual(already_approved.exception.status_code, 409)
 
     def test_admin_role_management_updates_active_sessions(self):
         users = main.list_users("admin-token")

@@ -28,7 +28,7 @@ python main.py create-user --name manager --role manager
 python main.py create-user --name reviewer --role reviewer
 ```
 
-Public sign-up is available through `POST /register`; every self-registered account is a creator, and sign-ups close when the database reaches 500 users. Admins can list users with `GET /users` and change a user's role to creator, manager, or reviewer through `POST /users/{user_id}/role`. Admin or demo accounts cannot be changed through that endpoint, and it cannot grant admin.
+Public sign-up is available through `POST /register`; users can choose creator, reviewer, or manager, and sign-ups close when the database reaches 500 users. Creator and reviewer accounts are active immediately. Manager accounts are created as pending and cannot log in until an admin approves them from the Users page (or through `POST /users/{user_id}/approve`). Admins can list users with `GET /users` and change a user's role to creator, manager, or reviewer through `POST /users/{user_id}/role`; changing a role as an admin activates the account. Admin or demo accounts cannot be changed through that endpoint, and it cannot grant admin.
 
 Demo accounts are disabled by default. For an isolated demo deployment, set `DEMO_MODE=true` before starting the backend. Startup creates `creator_demo`, `manager_demo`, `reviewer_demo`, and `admin_demo`, and ensures the sample sources exist. `DEMO_PASSWORD` overrides their shared password (at least 12 characters), which defaults to `DemoPass2026!`; `GET /demo-accounts` returns the demo credentials only while demo mode is enabled. When demo mode is disabled, startup removes these reserved demo accounts. Do not enable demo mode on a public deployment or use the reserved demo usernames for regular accounts.
 
@@ -131,7 +131,7 @@ The backend tests use temporary databases and mocked Anthropic responses; no rea
 ## Known limitations
 
 - Source retrieval uses keyword overlap, not embeddings; relevant context may be missed.
-- User and role administration is performed locally with the backend CLI; there is no user-management screen, password reset flow, or self-registration.
+- Users can self-register as creators, reviewers, or managers; manager accounts require admin approval. Admins manage roles and approvals in the Users page. There is no password reset flow.
 - Login tokens are kept in backend memory and expire after 12 hours; restarting the backend invalidates active sessions.
 - This is a local/demo governance workflow, not a substitute for a production identity provider, deployment-specific CORS configuration, or legal review.
 - Visual/image review is not implemented.
