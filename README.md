@@ -28,7 +28,9 @@ python main.py create-user --name manager --role manager
 python main.py create-user --name reviewer --role reviewer
 ```
 
-Roles are fixed on the server and cannot be selected or changed from the login screen. No demo usernames or passwords are preconfigured. The existing database had no user accounts; create your own credentials with the commands above.
+Public sign-up is available through `POST /register`; every self-registered account is a creator, and sign-ups close when the database reaches 500 users. Admins can list users with `GET /users` and change a user's role to creator, manager, or reviewer through `POST /users/{user_id}/role`. Admin or demo accounts cannot be changed through that endpoint, and it cannot grant admin.
+
+Demo accounts are disabled by default. For an isolated demo deployment, set `DEMO_MODE=true` before starting the backend. Startup creates `creator_demo`, `manager_demo`, `reviewer_demo`, and `admin_demo`, and ensures the sample sources exist. `DEMO_PASSWORD` overrides their shared password (at least 12 characters), which defaults to `DemoPass2026!`; `GET /demo-accounts` returns the demo credentials only while demo mode is enabled. When demo mode is disabled, startup removes these reserved demo accounts. Do not enable demo mode on a public deployment or use the reserved demo usernames for regular accounts.
 
 Seed the sample sources. This command is safe to repeat: existing equivalent sources are left as-is, including sources subsequently edited by an administrator.
 

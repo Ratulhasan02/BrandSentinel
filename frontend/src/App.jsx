@@ -19,17 +19,55 @@ export default function App() {
   </>);
 }
 
+// ===== FRONTEND PATCH for App.jsx =====
+
+// --- 1) REPLACE your whole Login function with this --------------------------------
 function Login({ onLogin, call, err }) {
+  const [mode, setMode] = useState("login");
   const [name, setName] = useState(""); const [password, setPassword] = useState("");
-  return (<div className="card" style={{ maxWidth: 380, margin: "60px auto" }}>
+  const [demo, setDemo] = useState([]);
+  useEffect(() => { call("/demo-accounts").then(setDemo).catch(() => {}); }, []);
+  const go = async (path, body) => { try { onLogin(await call(path, { method: "POST", body })); } catch {} };
+  const register = mode === "register";
+  return (<div className="card" style={{ maxWidth: 400, margin: "60px auto" }}>
     <h2>BrandSentinel</h2><p className="small">Pre-publication brand review. AI suggests, humans decide.</p>
+    <div className="row">
+      <button className={register ? "alt" : ""} onClick={() => setMode("login")}>Log in</button>
+      <button className={register ? "" : "alt"} onClick={() => setMode("register")}>Create account</button></div>
     <div className="row"><input autoComplete="username" placeholder="Username" value={name} onChange={e => setName(e.target.value)} />
-      <input autoComplete="current-password" type="password" placeholder="Password" value={password} onChange={e => setPassword(e.target.value)} />
-      <button onClick={async () => {
-        try { onLogin(await call("/login", { method: "POST", body: { name, password } })); } catch {}
-      }}>Log in</button></div>
-    <div className="small">Accounts are provisioned by a local administrator; roles cannot be selected here.</div>
-    {err && <div className="err">{err}</div>}</div>);
+      <input autoComplete={register ? "new-password" : "current-password"} type="password"
+        placeholder={register ? "Password (12+ characters)" : "Password"} value={password} onChange={e => setPassword(e.target.value)} />
+      <button onClick={() => go(register ? "/register" : "/login", { name, password })}>{register ? "Sign up" : "Log in"}</button></div>
+    <div className="small">New accounts are always creators. Manager and reviewer roles are assigned by an administrator.</div>
+    {err && <div className="err">{err}</div>}
+    {demo.length > 0 && <div style={{ background: "#ecfdf5", borderLeft: "3px solid #0f766e", padding: 8, borderRadius: 6, marginTop: 12 }}>
+      <b>Judge demo accounts</b>
+      <div className="small">One click to try each role. These exist for evaluation only.</div>
+      {demo.map(a => <div key={a.name} className="row"><span style={{ minWidth: 130 }}>{a.name}</span>
+        <button className="alt" onClick={() => go("/login", { name: a.name, password: a.password })}>Use ({a.role})</button></div>)}
+    </div>}</div>);
+}
+
+// --- 2) In Main(): add this button right after the "Brand sources" button ----------
+// {user.role === "admin" && <button className="alt" onClick={() => setTab("users")}>Users</button>}
+
+// --- 3) In Main(): change the right-hand render to ---------------------------------
+// {tab === "sources" ? <Sources user={user} call={call} />
+//  : tab === "users" ? <Users call={call} />
+//  : sel ? <Detail key={sel} id={sel} user={user} call={call} refresh={load} />
+//  : <div className="card">Select or create a submission.</div>}
+
+// --- 4) ADD this new component at the bottom of the file ---------------------------
+function Users({ call }) {
+  const [list, setList] = useState([]);
+  const load = async () => setList(await call("/users")); useEffect(() => { load(); }, []);
+  const setRole = async (id, role) => { try { await call(`/users/${id}/role`, { method: "POST", body: { role } }); await load(); } catch {} };
+  return (<div className="card"><b>Users and roles</b>
+    <div className="small">Sign-ups start as creators. Change roles here. Admin accounts are created only on the server.</div>
+    {list.map(u => <div key={u.id} className="row"><span style={{ minWidth: 170 }}>{u.name}</span>
+      {u.role === "admin" ? <span className="tag">admin</span> :
+        <select value={u.role} onChange={e => setRole(u.id, e.target.value)}>
+          {["creator", "manager", "reviewer"].map(r => <option key={r}>{r}</option>)}</select>}</div>)}</div>);
 }
 
 function Main({ user, call }) {

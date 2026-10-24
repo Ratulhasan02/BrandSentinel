@@ -217,6 +217,81 @@ class BrandSentinelTests(unittest.TestCase):
         )
         self.assertEqual(logged_in["role"], "creator")
 
+    def test_registration_validates_names_and_always_creates_creators(self):
+        registered = main.register(
+            main.Register(name="  new.creator  ", password="new-password-123")
+        )
+        self.assertEqual(registered["name"], "new.creator")
+        self.assertEqual(registered["role"], "creator")
+        user = main.q(
+            "SELECT role FROM users WHERE name='new.creator'", one=True
+        )
+        self.assertEqual(user["role"], "creator")
+
+        for name in ("ab", "invalid name", "creator_demo"):
+            with self.subTest(name=name), self.assertRaises(HTTPException) as error:
+                main.register(
+                    main.Register(name=name, password="new-password-123")
+                )
+            self.assertEqual(error.exception.status_code, 400)
+
+        with self.assertRaises(HTTPException) as short_password:
+            main.register(main.Register(name="another-user", password="short"))
+        self.assertEqual(short_password.exception.status_code, 400)
+
+    def test_admin_role_management_updates_active_sessions(self):
+        users = main.list_users("admin-token")
+        self.assertTrue(any(user["name"] == "creator-test" for user in users))
+        self.assertEqual(
+            main.change_role(
+                self.creator_id,
+                main.RoleChange(role="reviewer"),
+                "admin-token",
+            ),
+            {"ok": True},
+        )
+        self.assertEqual(main.TOKENS["creator-token"]["role"], "reviewer")
+        self.assertEqual(
+            main.q(
+                "SELECT role FROM users WHERE id=?", (self.creator_id,), one=True
+            )["role"],
+            "reviewer",
+        )
+
+        with self.assertRaises(HTTPException) as non_admin:
+            main.list_users("creator-token")
+        self.assertEqual(non_admin.exception.status_code, 403)
+
+        with self.assertRaises(HTTPException) as protected_admin:
+            main.change_role(
+                self.admin_id,
+                main.RoleChange(role="creator"),
+                "admin-token",
+            )
+        self.assertEqual(protected_admin.exception.status_code, 403)
+
+    def test_demo_accounts_are_created_or_removed_by_mode(self):
+        with patch.object(main, "DEMO_MODE", True), patch.object(
+            main, "DEMO_PASSWORD", "demo-password-123"
+        ):
+            main.ensure_demo_users()
+            demo_accounts = main.q(
+                "SELECT name,role FROM users WHERE name IN (?,?,?,?) ORDER BY name",
+                tuple(main.DEMO_NAMES),
+            )
+            self.assertEqual(len(demo_accounts), 4)
+            self.assertEqual(len(main.q("SELECT * FROM sources")), 3)
+            self.assertEqual(len(main.demo_accounts()), 4)
+
+        with patch.object(main, "DEMO_MODE", False):
+            main.ensure_demo_users()
+        remaining = main.q(
+            "SELECT count(*) AS n FROM users WHERE name IN (?,?,?,?)",
+            tuple(main.DEMO_NAMES),
+            one=True,
+        )
+        self.assertEqual(remaining["n"], 0)
+
     def test_role_access_and_approval_high_risk_override(self):
         created = main.create_submission(
             main.NewSub(title="Sample", channel="social post", text=SAMPLE),

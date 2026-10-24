@@ -28,10 +28,33 @@ PASSWORD_ITERATIONS = 310_000
 logger = logging.getLogger("brandsentinel")
 TOKENS: dict[str, dict] = {}
 
+DEMO_MODE = os.getenv("DEMO_MODE", "").lower() in ("1", "true", "yes")
+DEMO_PASSWORD = os.getenv("DEMO_PASSWORD", "DemoPass2026!")
+DEMO_USERS = [
+    ("creator_demo", "creator"),
+    ("manager_demo", "manager"),
+    ("reviewer_demo", "reviewer"),
+    ("admin_demo", "admin"),
+]
+DEMO_NAMES = {name for name, _ in DEMO_USERS}
+
+
+def ensure_demo_users():
+    """Create demo accounts and sources when enabled; otherwise remove those accounts."""
+    if not DEMO_MODE:
+        for name in DEMO_NAMES:
+            q("DELETE FROM users WHERE name=?", (name,), write=True)
+        return
+    for name, role in DEMO_USERS:
+        if not q("SELECT 1 FROM users WHERE name=?", (name,), one=True):
+            create_user(name, role, DEMO_PASSWORD)
+    seed_demo_data()
+
 
 @asynccontextmanager
 async def lifespan(_app):
     init()
+    ensure_demo_users()
     yield
 
 
@@ -508,6 +531,15 @@ class Login(BaseModel):
     password: str
 
 
+class Register(BaseModel):
+    name: str
+    password: str
+
+
+class RoleChange(BaseModel):
+    role: Literal["creator", "manager", "reviewer"]
+
+
 class NewSub(BaseModel):
     title: str
     channel: str = "social post"
@@ -562,6 +594,58 @@ def login(body: Login):
         "expires": datetime.now(timezone.utc).timestamp() + TOKEN_TTL_SECONDS,
     }
     return {"token": token, "name": user["name"], "role": user["role"]}
+
+
+@app.post("/register")
+def register(body: Register):
+    name = body.name.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,40}", name):
+        raise HTTPException(
+            400, "Username must be 3-40 characters: letters, numbers, . _ -"
+        )
+    if name in DEMO_NAMES:
+        raise HTTPException(400, "That username is reserved")
+    if q("SELECT count(*) AS n FROM users", one=True)["n"] >= 500:
+        raise HTTPException(429, "Sign-ups are temporarily closed")
+    try:
+        create_user(name, "creator", body.password)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return login(Login(name=name, password=body.password))
+
+
+@app.get("/demo-accounts")
+def demo_accounts():
+    if not DEMO_MODE:
+        return []
+    return [
+        {"name": name, "role": role, "password": DEMO_PASSWORD}
+        for name, role in DEMO_USERS
+    ]
+
+
+@app.get("/users")
+def list_users(x_token: str = Header("")):
+    if me(x_token)["role"] != "admin":
+        raise HTTPException(403, "Admin only")
+    return q("SELECT id,name,role,created FROM users ORDER BY id")
+
+
+@app.post("/users/{user_id}/role")
+def change_role(user_id: int, body: RoleChange, x_token: str = Header("")):
+    admin = me(x_token)
+    if admin["role"] != "admin":
+        raise HTTPException(403, "Admin only")
+    target = q("SELECT id,name,role FROM users WHERE id=?", (user_id,), one=True)
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target["role"] == "admin" or target["name"] in DEMO_NAMES:
+        raise HTTPException(403, "Admin and demo accounts cannot be changed here")
+    q("UPDATE users SET role=? WHERE id=?", (body.role, user_id), write=True)
+    for session in TOKENS.values():
+        if session["name"] == target["name"]:
+            session["role"] = body.role
+    return {"ok": True}
 
 
 @app.post("/extract")
